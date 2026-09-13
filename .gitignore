@@ -26,3 +26,6 @@ airflow.cfg
 
 # IDE
 .vscode/
+
+# Temporary CI test environment
+.ci-test/

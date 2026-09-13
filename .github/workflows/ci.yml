@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: platform
+          POSTGRES_USER: platform_user
+          POSTGRES_PASSWORD: platform_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U platform_user -d platform"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: platform
+      POSTGRES_USER: platform_user
+      POSTGRES_PASSWORD: platform_password
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create database schemas and tables
+        run: |
+          python src/run_sql.py sql/raw/001_create_fred_observations.sql
+          python src/run_sql.py sql/raw/002_create_yahoo_prices.sql
+          python src/run_sql.py sql/raw/003_create_tiingo_prices.sql
+          python src/run_sql.py sql/staging/001_create_staging_market.sql
+          python src/run_sql.py sql/curated/001_create_star_schema.sql
+          python src/run_sql.py sql/curated/004_create_macro_fact.sql
+
+      - name: Run Python syntax checks
+        run: |
+          python -m py_compile src/*.py
+          python -m py_compile dags/*.py
