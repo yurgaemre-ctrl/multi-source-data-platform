@@ -142,6 +142,55 @@ The result is useful precisely because model complexity was evaluated empiricall
 
 ![Actual vs predicted returns](docs/images/actual_vs_predicted.png)
 
+## Feature Representation Sensitivity
+
+The baseline analysis above used lagged macroeconomic **levels**. That raised a second question: would the models perform differently if macroeconomic conditions were represented by what was **changing**, rather than primarily by their levels?
+
+I therefore re-expressed the macroeconomic predictors while leaving the rest of the analytical structure unchanged.
+
+For the federal funds rate, unemployment rate, and 10-year Treasury yield, I used monthly first differences. For CPI, industrial production, payroll employment, and M2, I used monthly log growth rates. These transformed variables were again lagged by one month.
+
+I then compared three specifications:
+
+1. **Levels** — the original lagged macroeconomic levels;
+2. **Changes/Growth** — lagged changes in rates and lagged growth rates for the quantity/index variables;
+3. **Combined** — both levels and changes/growth.
+
+The market predictors, chronological train-test split, Ridge specification, and neural-network architecture were otherwise unchanged.
+
+| Specification | Model | RMSE | MAE | Out-of-sample R² |
+|---|---|---:|---:|---:|
+| Levels | Ridge regression | 0.046811 | 0.037427 | -0.126650 |
+| Levels | Neural network | 0.051809 | 0.040361 | -0.380087 |
+| Changes/Growth | Ridge regression | **0.045586** | 0.037454 | **-0.068429** |
+| Changes/Growth | Neural network | **0.048705** | **0.039631** | **-0.219672** |
+| Combined | Ridge regression | 0.049763 | 0.041374 | -0.273196 |
+| Combined | Neural network | 0.069040 | 0.050213 | -1.450714 |
+
+Representing macroeconomic conditions as **changes or growth rates improved out-of-sample performance for both models** relative to using levels.
+
+For Ridge regression, RMSE declined from 0.0468 to 0.0456 and out-of-sample R² improved from -0.127 to -0.068. The neural network also improved: RMSE declined from 0.0518 to 0.0487 and R² improved from -0.380 to -0.220.
+
+The improvement did not overturn the original model comparison. **Ridge regression continued to outperform the neural network.**
+
+The combined specification performed worse than either representation alone, particularly for the neural network. Adding both levels and changes increased the feature space without improving generalization.
+
+This provides an additional result from the exercise: **changing how the information was represented helped more than increasing model complexity or simply adding more features.**
+
+At the same time, all out-of-sample R² values remained negative. The changes/growth specification therefore improved relative predictive performance, but the results should not be interpreted as demonstrating a strong forecasting model.
+
+### Prediction error by macro feature representation
+
+![RMSE by macro feature representation](docs/images/feature_representation_rmse.png)
+
+The changes/growth specification produced the lowest RMSE for both Ridge regression and the neural network.
+
+### Out-of-sample R² by macro feature representation
+
+![R-squared by macro feature representation](docs/images/feature_representation_r2.png)
+
+The same ordering is visible in out-of-sample R². Changes/growth improved both models, while combining levels and changes degraded performance. All specifications nevertheless remained below zero.
+
 ### Out-of-sample error
 
 ![Model error comparison](docs/images/model_error_comparison.png)
@@ -247,6 +296,7 @@ Important extensions include:
 - release-date-aware macroeconomic features and ALFRED vintages;
 - rolling-origin time-series validation;
 - richer monitoring and data-lineage metadata;
+- rolling-origin time-series validation;
 - enterprise authentication and authorization controls.
 
 A particularly important modeling limitation is that FRED observation dates represent economic reference periods rather than necessarily the information set available to a forecaster on that date. Lagging the macroeconomic variables reduces same-period leakage, but a rigorous real-time forecasting study would use release-date-aware or vintage data.

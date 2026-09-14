@@ -111,9 +111,49 @@ def build_monthly_dataset(market, macro):
         ]
     ]
 
-    macro_lagged = macro_wide.shift(1).add_prefix("lag_")
+    # ---------------------------------------------------------
+    # 1. Macro levels
+    # ---------------------------------------------------------
+    macro_levels = macro_wide.copy()
 
-    data = monthly_market.join(macro_lagged, how="inner")
+    # ---------------------------------------------------------
+    # 2. Macro changes / growth rates
+    #
+    # Interest rates and unemployment:
+    #   first differences in percentage points
+    #
+    # CPI, industrial production, payrolls and M2:
+    #   log growth rates
+    # ---------------------------------------------------------
+    macro_changes = pd.DataFrame(index=macro_wide.index)
+
+    macro_changes["FEDFUNDS"] = macro_wide["FEDFUNDS"].diff()
+    macro_changes["UNRATE"] = macro_wide["UNRATE"].diff()
+    macro_changes["GS10"] = macro_wide["GS10"].diff()
+
+    macro_changes["CPIAUCSL"] = np.log(macro_wide["CPIAUCSL"]).diff()
+    macro_changes["INDPRO"] = np.log(macro_wide["INDPRO"]).diff()
+    macro_changes["PAYEMS"] = np.log(macro_wide["PAYEMS"]).diff()
+    macro_changes["M2SL"] = np.log(macro_wide["M2SL"]).diff()
+
+    # ---------------------------------------------------------
+    # 3. Lag both representations by one month
+    # ---------------------------------------------------------
+    macro_levels_lagged = macro_levels.shift(1).add_prefix("lag_level_")
+    macro_changes_lagged = macro_changes.shift(1).add_prefix("lag_change_")
+
+    macro_features = pd.concat(
+        [
+            macro_levels_lagged,
+            macro_changes_lagged,
+        ],
+        axis=1,
+    )
+
+    data = monthly_market.join(
+        macro_features,
+        how="inner",
+    )
 
     data["target_next_month_return"] = data["spy_return"].shift(-1)
 
@@ -138,9 +178,20 @@ class MarketMLP(nn.Module):
 
 def regression_metrics(y_true, y_pred):
     return {
-        "RMSE": np.sqrt(mean_squared_error(y_true, y_pred)),
-        "MAE": mean_absolute_error(y_true, y_pred),
-        "R2": r2_score(y_true, y_pred),
+        "RMSE": np.sqrt(
+            mean_squared_error(
+                y_true,
+                y_pred,
+            )
+        ),
+        "MAE": mean_absolute_error(
+            y_true,
+            y_pred,
+        ),
+        "R2": r2_score(
+            y_true,
+            y_pred,
+        ),
     }
 
 
@@ -152,148 +203,285 @@ def main():
         market = load_market_data(connection)
         macro = load_macro_data(connection)
 
-    data = build_monthly_dataset(market, macro)
+    data = build_monthly_dataset(
+        market,
+        macro,
+    )
 
-    feature_columns = [
+    # ---------------------------------------------------------
+    # Market features are identical in every specification
+    # ---------------------------------------------------------
+    market_features = [
         "spy_return",
         "spy_volatility",
         "vix",
-        "lag_FEDFUNDS",
-        "lag_CPIAUCSL",
-        "lag_UNRATE",
-        "lag_GS10",
-        "lag_INDPRO",
-        "lag_PAYEMS",
-        "lag_M2SL",
     ]
 
-    X = data[feature_columns]
+    # ---------------------------------------------------------
+    # Macro levels
+    # ---------------------------------------------------------
+    level_features = [
+        "lag_level_FEDFUNDS",
+        "lag_level_CPIAUCSL",
+        "lag_level_UNRATE",
+        "lag_level_GS10",
+        "lag_level_INDPRO",
+        "lag_level_PAYEMS",
+        "lag_level_M2SL",
+    ]
+
+    # ---------------------------------------------------------
+    # Macro changes / growth
+    # ---------------------------------------------------------
+    change_features = [
+        "lag_change_FEDFUNDS",
+        "lag_change_CPIAUCSL",
+        "lag_change_UNRATE",
+        "lag_change_GS10",
+        "lag_change_INDPRO",
+        "lag_change_PAYEMS",
+        "lag_change_M2SL",
+    ]
+
+    # ---------------------------------------------------------
+    # Three specifications
+    # ---------------------------------------------------------
+    specifications = {
+        "Levels": (
+            market_features
+            + level_features
+        ),
+        "Changes/Growth": (
+            market_features
+            + change_features
+        ),
+        "Combined": (
+            market_features
+            + level_features
+            + change_features
+        ),
+    }
+
     y = data["target_next_month_return"]
 
+    # Same chronological split for all specifications
     split_index = int(len(data) * 0.80)
-
-    X_train = X.iloc[:split_index]
-    X_test = X.iloc[split_index:]
 
     y_train = y.iloc[:split_index]
     y_test = y.iloc[split_index:]
 
-    scaler = StandardScaler()
-
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-
-    baseline = Ridge(alpha=1.0)
-    baseline.fit(X_train_scaled, y_train)
-
-    baseline_predictions = baseline.predict(X_test_scaled)
-
-    baseline_metrics = regression_metrics(
-        y_test,
-        baseline_predictions,
-    )
-
-    X_train_tensor = torch.tensor(
-        X_train_scaled,
-        dtype=torch.float32,
-    )
-
-    y_train_tensor = torch.tensor(
-        y_train.values.reshape(-1, 1),
-        dtype=torch.float32,
-    )
-
-    X_test_tensor = torch.tensor(
-        X_test_scaled,
-        dtype=torch.float32,
-    )
-
-    model = MarketMLP(X_train_scaled.shape[1])
-
-    loss_function = nn.MSELoss()
-
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=0.001,
-        weight_decay=0.0001,
-    )
-
-    model.train()
-
-    for epoch in range(500):
-        optimizer.zero_grad()
-
-        predictions = model(X_train_tensor)
-
-        loss = loss_function(
-            predictions,
-            y_train_tensor,
-        )
-
-        loss.backward()
-        optimizer.step()
-
-    model.eval()
-
-    with torch.no_grad():
-        neural_predictions = (
-            model(X_test_tensor)
-            .numpy()
-            .flatten()
-        )
-
-    neural_metrics = regression_metrics(
-        y_test,
-        neural_predictions,
-    )
-
-    results = pd.DataFrame(
-        [
-            {
-                "model": "Ridge regression",
-                **baseline_metrics,
-            },
-            {
-                "model": "Neural network",
-                **neural_metrics,
-            },
-        ]
-    )
+    all_results = []
 
     predictions_output = pd.DataFrame(
         {
             "date": data.index[split_index:],
             "actual_return": y_test.values,
-            "ridge_prediction": baseline_predictions,
-            "neural_prediction": neural_predictions,
         }
     )
 
-    os.makedirs("data/model_output", exist_ok=True)
+    # ---------------------------------------------------------
+    # Run each feature specification
+    # ---------------------------------------------------------
+    for specification_name, feature_columns in specifications.items():
+
+        print(
+            f"\nRunning specification: "
+            f"{specification_name}"
+        )
+
+        X = data[feature_columns]
+
+        X_train = X.iloc[:split_index]
+        X_test = X.iloc[split_index:]
+
+        scaler = StandardScaler()
+
+        X_train_scaled = scaler.fit_transform(
+            X_train
+        )
+
+        X_test_scaled = scaler.transform(
+            X_test
+        )
+
+        # =====================================================
+        # Ridge regression
+        # =====================================================
+        baseline = Ridge(
+            alpha=1.0
+        )
+
+        baseline.fit(
+            X_train_scaled,
+            y_train,
+        )
+
+        baseline_predictions = baseline.predict(
+            X_test_scaled
+        )
+
+        baseline_metrics = regression_metrics(
+            y_test,
+            baseline_predictions,
+        )
+
+        all_results.append(
+            {
+                "specification": specification_name,
+                "model": "Ridge regression",
+                **baseline_metrics,
+            }
+        )
+
+        # =====================================================
+        # Neural network
+        # =====================================================
+        # Reset seed so every specification begins from a
+        # reproducible initialization.
+        torch.manual_seed(42)
+
+        X_train_tensor = torch.tensor(
+            X_train_scaled,
+            dtype=torch.float32,
+        )
+
+        y_train_tensor = torch.tensor(
+            y_train.values.reshape(-1, 1),
+            dtype=torch.float32,
+        )
+
+        X_test_tensor = torch.tensor(
+            X_test_scaled,
+            dtype=torch.float32,
+        )
+
+        model = MarketMLP(
+            X_train_scaled.shape[1]
+        )
+
+        loss_function = nn.MSELoss()
+
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=0.001,
+            weight_decay=0.0001,
+        )
+
+        model.train()
+
+        for epoch in range(500):
+
+            optimizer.zero_grad()
+
+            predictions = model(
+                X_train_tensor
+            )
+
+            loss = loss_function(
+                predictions,
+                y_train_tensor,
+            )
+
+            loss.backward()
+
+            optimizer.step()
+
+        model.eval()
+
+        with torch.no_grad():
+
+            neural_predictions = (
+                model(
+                    X_test_tensor
+                )
+                .numpy()
+                .flatten()
+            )
+
+        neural_metrics = regression_metrics(
+            y_test,
+            neural_predictions,
+        )
+
+        all_results.append(
+            {
+                "specification": specification_name,
+                "model": "Neural network",
+                **neural_metrics,
+            }
+        )
+
+        # -----------------------------------------------------
+        # Save predictions for each specification
+        # -----------------------------------------------------
+        output_name = (
+            specification_name
+            .lower()
+            .replace("/", "_")
+            .replace(" ", "_")
+        )
+
+        predictions_output[
+            f"{output_name}_ridge_prediction"
+        ] = baseline_predictions
+
+        predictions_output[
+            f"{output_name}_neural_prediction"
+        ] = neural_predictions
+
+    # ---------------------------------------------------------
+    # Save results
+    # ---------------------------------------------------------
+    results = pd.DataFrame(
+        all_results
+    )
+
+    os.makedirs(
+        "data/model_output",
+        exist_ok=True,
+    )
 
     results.to_csv(
-        "data/model_output/model_metrics.csv",
+        "data/model_output/"
+        "model_metrics_feature_comparison.csv",
         index=False,
     )
 
     predictions_output.to_csv(
-        "data/model_output/predictions.csv",
+        "data/model_output/"
+        "predictions_feature_comparison.csv",
         index=False,
     )
 
-    print(f"Observations: {len(data)}")
+    # ---------------------------------------------------------
+    # Console output
+    # ---------------------------------------------------------
     print(
-        f"Training observations: {len(X_train)} | "
-        f"Test observations: {len(X_test)}"
+        f"\nObservations: {len(data)}"
     )
 
-    print("\nOut-of-sample model performance:")
-    print(results.to_string(index=False))
+    print(
+        f"Training observations: {split_index} | "
+        f"Test observations: "
+        f"{len(data) - split_index}"
+    )
 
     print(
-        "\nResults saved to "
-        "data/model_output/model_metrics.csv "
-        "and data/model_output/predictions.csv"
+        "\nOut-of-sample model performance:"
+    )
+
+    print(
+        results.to_string(
+            index=False
+        )
+    )
+
+    print(
+        "\nResults saved to:\n"
+        "data/model_output/"
+        "model_metrics_feature_comparison.csv\n"
+        "data/model_output/"
+        "predictions_feature_comparison.csv"
     )
 
 
